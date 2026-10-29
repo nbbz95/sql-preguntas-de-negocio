@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SQL para preguntas de negocio</title>
+<meta name="description" content="15 preguntas reales de un e-commerce respondidas con SQL: CTEs, funciones de ventana, top-N por grupo, cohortes y pivots. Cada una con su resultado y su conclusión.">
+<link rel="stylesheet" href="assets/ui.css">
+<style>
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 20px; }
+  .toolbar input { flex: 1 1 220px; max-width: 320px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chips .btn { min-height: 32px; padding: 4px 12px; font-size: 13px; border-radius: 999px; }
+  .q { margin-bottom: 16px; }
+  .q-head { display: flex; gap: 14px; align-items: flex-start; }
+  .q-num { flex: none; width: 30px; height: 30px; border-radius: 8px; background: var(--surface-2); color: var(--ink-2); display: grid; place-items: center; font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .q h2 { font-size: 16px; margin: 3px 0 4px; text-wrap: balance; }
+  .q .tec { font-size: 12.5px; color: var(--muted); margin: 0; }
+  .q .callout { margin: 14px 0; }
+  .q .seg { margin-bottom: 12px; }
+  .panel[hidden] { display: none; }
+  .panel { animation: panel 180ms var(--ease-out); }
+  @keyframes panel { from { opacity: 0; transform: translateY(3px); } }
+  pre .k { color: var(--s7); font-weight: 600; }
+  pre .s { color: var(--s3); }
+  pre .c { color: var(--muted); font-style: italic; }
+  pre .f { color: var(--s1); }
+  .empty { color: var(--muted); padding: 24px 0; text-align: center; }
+  .count { font-size: 13px; color: var(--muted); margin-left: auto; }
+  @media (prefers-reduced-motion: reduce) { .panel { animation: none; } }
+</style>
+</head>
+<body>
+<div class="wrap" style="max-width:960px">
+  <header class="top">
+    <div>
+      <div class="eyebrow">SQL de negocio · DuckDB</div>
+      <h1>15 preguntas de negocio respondidas con SQL</h1>
+      <p>Las preguntas que un gerente le hace a un analista sobre un e-commerce real (100 mil órdenes de Olist). Cada una con la consulta, el resultado y qué decisión habilita.</p>
+    </div>
+    <button class="btn" id="theme" type="button">Auto</button>
+  </header>
+
+  <div class="toolbar">
+    <input type="search" id="search" placeholder="Buscar pregunta o técnica" aria-label="Buscar">
+    <div class="chips" id="chips" role="group" aria-label="Filtrar por técnica"></div>
+    <span class="count" id="count"></span>
+  </div>
+
+  <main id="list"></main>
+
+  <footer class="foot">
+    Datos: <a href="https://github.com/olist/work-at-olist-data">Olist, Brazilian E-Commerce Public Dataset</a>. Las consultas viven en
+    <a href="https://github.com/nbbz95/sql-preguntas-de-negocio/tree/main/queries">queries/</a> y CI las corre y testea en cada push.
+  </footer>
+</div>
+
+<script src="assets/charts.js"></script>
+<script>
+const TECNICAS = { "Ventanas": /over|lag|lead|row_number|rank|ntile/i, "CTE": /\bwith\b/i, "Top-N por grupo": /qualify|partition by/i, "FILTER / pivot": /filter \(where/i, "CASE": /\bcase\b/i };
+const fmtNum = (v) => typeof v === "number" ? v.toLocaleString("es-AR", { maximumFractionDigits: 2 }) : v ?? "";
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const KW = /\b(with|as|select|from|join|left|using|where|and|or|in|between|group|by|order|having|limit|qualify|over|partition|rows|unbounded|preceding|filter|case|when|then|else|end|desc|is|not|null|distinct|on|cross)\b/gi;
+const FN = /\b(sum|count|avg|min|max|round|median|lag|lead|row_number|dense_rank|ntile|coalesce|date_trunc|date_diff|strftime|year|month|quarter|hour|isodow|left|cast)\b(?=\()/gi;
+
+function highlight(sql) {
+  return sql.split("\n").map((line) => {
+    const i = line.indexOf("--");
+    const code = i >= 0 ? line.slice(0, i) : line, comment = i >= 0 ? line.slice(i) : "";
+    let h = esc(code).replace(/'[^']*'/g, (m) => `\u0000s${m}\u0001`)
+      .replace(FN, (m) => `<span class="f">${m}</span>`)
+      .replace(KW, (m) => `<span class="k">${m}</span>`)
+      .replace(/\u0000s([^\u0001]*)\u0001/g, (_, m) => `<span class="s">${m}</span>`);
+    return h + (comment ? `<span class="c">${esc(comment)}</span>` : "");
+  }).join("\n");
+}
+
+let DATA = [], activeTec = null, charts = [];
+
+function render() {
+  const term = document.getElementById("search").value.trim().toLowerCase();
+  const list = document.getElementById("list");
+  charts = [];
+  const items = DATA.filter((q) =>
+    (!activeTec || TECNICAS[activeTec].test(q.sql)) &&
+    (!term || (q.titulo + " " + q.tecnica + " " + q.hallazgo).toLowerCase().includes(term)));
+  document.getElementById("count").textContent = `${items.length} de ${DATA.length}`;
+  if (!items.length) { list.innerHTML = '<p class="empty">Ninguna pregunta coincide con el filtro.</p>'; return; }
+  list.innerHTML = items.map((q, idx) => `
+    <article class="card q reveal" id="q-${q.id}">
+      <div class="q-head">
+        <span class="q-num">${+q.id.slice(0, 2)}</span>
+        <div><h2>${q.titulo}</h2><p class="tec">${q.tecnica}</p></div>
+      </div>
+      <p class="callout">${q.hallazgo}</p>
+      <div class="seg" role="tablist">
+        ${q.grafico ? `<button class="btn" role="tab" data-tab="chart">Gráfico</button>` : ""}
+        <button class="btn" role="tab" data-tab="table">Resultado</button>
+        <button class="btn" role="tab" data-tab="sql">SQL</button>
+      </div>
+      ${q.grafico ? `<div class="panel" data-panel="chart"><div class="viz" id="viz-${q.id}"></div></div>` : ""}
+      <div class="panel" data-panel="table"><div class="tbl"></div></div>
+      <div class="panel" data-panel="sql"><pre><code>${highlight(q.sql)}</code></pre></div>
+    </article>`).join("");
+
+  items.forEach((q) => {
+    const card = document.getElementById("q-" + q.id);
+    Charts.table(card.querySelector(".tbl"), q.columnas, q.filas.map((f) => f.map(fmtNum)));
+    const show = (tab) => {
+      card.querySelectorAll("[data-tab]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.tab === tab));
+      card.querySelectorAll("[data-panel]").forEach((p) => (p.hidden = p.dataset.panel !== tab));
+      if (tab === "chart" && !card.dataset.drawn) { card.dataset.drawn = 1; drawChart(q); }
+    };
+    card.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => show(b.dataset.tab)));
+    show(q.grafico ? "chart" : "table");
+  });
+}
+
+function drawChart(q) {
+  const [kind, xc, yc] = q.grafico.split(" ");
+  const xi = q.columnas.indexOf(xc), yi = q.columnas.indexOf(yc);
+  const el = document.getElementById("viz-" + q.id);
+  const isPct = yc.endsWith("pct");
+  const fmt = (v) => (isPct ? v.toLocaleString("es-AR", { maximumFractionDigits: 1 }) + "%" :
+    Math.abs(v) >= 1e6 ? (v / 1e6).toLocaleString("es-AR", { maximumFractionDigits: 2 }) + " M" :
+    Math.abs(v) >= 1e3 ? Math.round(v / 1e3).toLocaleString("es-AR") + " k" : v.toLocaleString("es-AR", { maximumFractionDigits: 2 }));
+  if (kind === "line") {
+    charts.push(Charts.line(el, { labels: q.filas.map((f) => f[xi]), series: [{ name: yc, values: q.filas.map((f) => f[yi]) }], fmt, height: 220 }));
+  } else {
+    charts.push(Charts.bars(el, { items: q.filas.map((f) => ({ label: String(f[xi]).replace(/^\d\. /, "").replaceAll("_", " "), value: f[yi] })), fmt, valueName: yc.replaceAll("_", " "), labelWidth: 170 }));
+  }
+}
+
+fetch("data.json").then((r) => r.json()).then((d) => {
+  DATA = d;
+  const chips = document.getElementById("chips");
+  chips.innerHTML = Object.keys(TECNICAS).map((t) => `<button class="btn" type="button" aria-pressed="false" data-t="${t}">${t}</button>`).join("");
+  chips.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-t]"); if (!b) return;
+    activeTec = activeTec === b.dataset.t ? null : b.dataset.t;
+    chips.querySelectorAll("[data-t]").forEach((x) => x.setAttribute("aria-pressed", x.dataset.t === activeTec));
+    render();
+  });
+  document.getElementById("search").addEventListener("input", render);
+  render();
+  Charts.themeToggle(document.getElementById("theme"), () => { document.querySelectorAll("[data-drawn]").forEach((c) => c.removeAttribute("data-drawn")); render(); },
+    { system: "Auto", light: "Claro", dark: "Oscuro", prefix: "Tema" });
+});
+</script>
+</body>
+</html>
